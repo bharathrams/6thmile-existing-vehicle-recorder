@@ -25,7 +25,9 @@ import {
   Gauge,
   UserCheck,
   FileSpreadsheet,
-  Send
+  Send,
+  Plus,
+  Trash2
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { motion, AnimatePresence } from 'motion/react';
@@ -48,6 +50,8 @@ export default function App() {
   const [viewMode, setViewMode] = useState<'table' | 'json'>('table');
   const [submitting, setSubmitting] = useState(false);
   const [submitStatus, setSubmitStatus] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+  const [showErrors, setShowErrors] = useState(false);
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
   const onDrop = useCallback((acceptedFiles: File[]) => {
     const selectedFile = acceptedFiles[0];
@@ -71,13 +75,44 @@ export default function App() {
     multiple: false
   } as any);
 
+  const normalizeDate = (raw: string): string => {
+    if (!raw.trim()) return '';
+    // Try parsing common formats: DD-MM-YY, DD/MM/YY, DD-MM-YYYY, DD/MM/YYYY
+    const cleaned = raw.trim().replace(/[/]/g, '-');
+    const parts = cleaned.split('-');
+    if (parts.length === 3) {
+      let [day, month, year] = parts;
+      if (year.length === 2) year = `20${year}`;
+      const d = parseInt(day, 10);
+      const m = parseInt(month, 10);
+      const y = parseInt(year, 10);
+      if (d >= 1 && d <= 31 && m >= 1 && m <= 12 && y >= 2000 && y <= 2099) {
+        return `${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`;
+      }
+    }
+    return raw;
+  };
+
   const handleProcess = async () => {
     if (!preview || !file) return;
 
     setLoading(true);
     setError(null);
+    setShowErrors(false);
+    setSubmitStatus(null);
     try {
       const result = await extractJobCardData(preview, file.type);
+      const d = result.job_card_details;
+      // Normalize dates to YYYY-MM-DD for date input
+      d.date = normalizeDate(d.date);
+      d.delivery_date = normalizeDate(d.delivery_date);
+      const filledCount = [d.customer_name, d.date, d.mobile_number, d.vehicle_make, d.registration_number, d.work_done_by, d.km_reading]
+        .filter(v => v.trim()).length;
+      if (filledCount < 2) {
+        setError("This doesn't appear to be a valid job card. Please upload a proper job card image with customer details, vehicle info, and accessories table.");
+        setData(null);
+        return;
+      }
       setData(result);
     } catch (err) {
       console.error(err);
@@ -101,11 +136,34 @@ export default function App() {
     });
   };
 
+  const recalcTotals = (items: AccessoryItem[]) => {
+    const materialTotal = items.reduce((sum, item) => sum + (parseFloat(item.material_cost) || 0), 0);
+    const labourTotal = items.reduce((sum, item) => sum + (parseFloat(item.labour_cost) || 0), 0);
+    return {
+      material_total: materialTotal.toString(),
+      labour_total: labourTotal.toString(),
+      grand_total: (materialTotal + labourTotal).toString(),
+    };
+  };
+
   const updateItem = (idx: number, key: keyof AccessoryItem, value: string) => {
     if (!data) return;
     const newItems = [...data.items];
     newItems[idx] = { ...newItems[idx], [key]: value };
-    setData({ ...data, items: newItems });
+    const totals = (key === 'material_cost' || key === 'labour_cost') ? recalcTotals(newItems) : data.totals;
+    setData({ ...data, items: newItems, totals });
+  };
+
+  const addItem = () => {
+    if (!data) return;
+    const newItem: AccessoryItem = { sl_no: String(data.items.length + 1), description: '', quantity: '', material_cost: '', labour_cost: '' };
+    setData({ ...data, items: [...data.items, newItem] });
+  };
+
+  const removeItem = (idx: number) => {
+    if (!data) return;
+    const newItems = data.items.filter((_, i) => i !== idx);
+    setData({ ...data, items: newItems, totals: recalcTotals(newItems) });
   };
 
   const updateTotal = (key: 'material_total' | 'labour_total' | 'grand_total', value: string) => {
@@ -113,15 +171,37 @@ export default function App() {
     setData({ ...data, totals: { ...data.totals, [key]: value } });
   };
 
+  const hasEmptyRequired = (data: JobCardData): boolean => {
+    const d = data.job_card_details;
+    return !d.customer_name.trim() || !d.date.trim() || !d.mobile_number.trim() ||
+      !d.address.trim() || !d.vin_number.trim() || !d.delivery_date.trim() ||
+      !d.vehicle_make.trim() || !d.registration_number.trim() ||
+      !d.work_done_by.trim() || !d.km_reading.trim() || data.items.length === 0;
+  };
+
   const handleSubmit = async () => {
     if (!data) return;
+
+    setShowErrors(true);
+    if (hasEmptyRequired(data)) {
+      setSubmitStatus({ type: 'error', message: 'Please fill in all required fields' });
+      return;
+    }
+
     setSubmitting(true);
     setSubmitStatus(null);
     console.log('Submitting Job Card Data:', data);
     try {
       const result = await submitToDatabase(data);
       console.log('Submit result:', result);
-      setSubmitStatus({ type: 'success', message: result.message });
+      // Clear form
+      setData(null);
+      setFile(null);
+      setPreview(null);
+      setShowErrors(false);
+      setSubmitStatus(null);
+      setSuccessMessage('Job card saved successfully!');
+      setTimeout(() => setSuccessMessage(null), 4000);
     } catch (err) {
       console.error('Submit error:', err);
       setSubmitStatus({ type: 'error', message: err instanceof Error ? err.message : 'Failed to submit' });
@@ -206,8 +286,8 @@ export default function App() {
             <FileText className="text-[#E4E3E0] w-6 h-6" />
           </div>
           <div>
-            <h1 className="font-serif italic text-xl leading-none">Job Card Extractor</h1>
-            <p className="text-[10px] uppercase tracking-widest opacity-50 mt-1 font-mono">Workshop Intelligence v1.0</p>
+            <h1 className="font-bold text-xl leading-none">Job Card Extractor</h1>
+            <p className="text-[10px] uppercase tracking-widest text-[#141414]/60 mt-1 font-mono">Workshop Intelligence v1.0</p>
           </div>
         </div>
         {data && (
@@ -244,8 +324,8 @@ export default function App() {
         <div className="lg:col-span-5 space-y-6">
           <section className="bg-white border border-[#141414] p-1 shadow-[4px_4px_0px_0px_rgba(20,20,20,1)]">
             <div className="p-4 border-b border-[#141414] flex justify-between items-center">
-              <h2 className="font-serif italic text-lg">Input Source</h2>
-              <span className="font-mono text-[10px] opacity-50 uppercase tracking-wider">Step 01</span>
+              <h2 className="font-bold text-lg">Input Source</h2>
+              <span className="font-mono text-[10px] text-[#141414]/70 uppercase tracking-wider">Step 01</span>
             </div>
             
             <div className="p-4">
@@ -277,7 +357,7 @@ export default function App() {
                     </div>
                     <div>
                       <p className="font-medium">Drop job card image here</p>
-                      <p className="text-xs opacity-50 mt-1">JPEG, PNG or WebP up to 10MB</p>
+                      <p className="text-xs text-[#141414]/70 mt-1">JPEG, PNG or WebP up to 10MB</p>
                     </div>
                   </>
                 )}
@@ -307,7 +387,7 @@ export default function App() {
           </section>
 
           {error && (
-            <motion.div 
+            <motion.div
               initial={{ opacity: 0, y: 10 }}
               animate={{ opacity: 1, y: 0 }}
               className="bg-red-50 border border-red-900/20 p-4 flex gap-3 text-red-900"
@@ -319,6 +399,21 @@ export default function App() {
               </div>
             </motion.div>
           )}
+
+          {successMessage && (
+            <motion.div
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -10 }}
+              className="bg-green-50 border border-green-900/20 p-4 flex gap-3 text-green-900"
+            >
+              <CheckCircle2 className="shrink-0 w-5 h-5" />
+              <div>
+                <p className="font-bold text-sm">Success</p>
+                <p className="text-xs opacity-80 mt-1">{successMessage}</p>
+              </div>
+            </motion.div>
+          )}
         </div>
 
         {/* Right Column: Results */}
@@ -326,13 +421,13 @@ export default function App() {
           <section className="bg-white border border-[#141414] p-1 shadow-[4px_4px_0px_0px_rgba(20,20,20,1)] min-h-[600px] flex flex-col">
             <div className="p-4 border-b border-[#141414] flex justify-between items-center">
               <div className="flex items-center gap-4">
-                <h2 className="font-serif italic text-lg">Extraction Results</h2>
+                <h2 className="font-bold text-lg">Extraction Results</h2>
                 <div className="flex bg-[#E4E3E0] p-0.5 rounded-sm">
                   <button 
                     onClick={() => setViewMode('table')}
                     className={cn(
                       "p-1.5 rounded-sm transition-all",
-                      viewMode === 'table' ? "bg-white shadow-sm" : "opacity-40 hover:opacity-100"
+                      viewMode === 'table' ? "bg-white shadow-sm" : "text-[#141414]/70 hover:opacity-100"
                     )}
                   >
                     <TableIcon size={14} />
@@ -341,14 +436,14 @@ export default function App() {
                     onClick={() => setViewMode('json')}
                     className={cn(
                       "p-1.5 rounded-sm transition-all",
-                      viewMode === 'json' ? "bg-white shadow-sm" : "opacity-40 hover:opacity-100"
+                      viewMode === 'json' ? "bg-white shadow-sm" : "text-[#141414]/70 hover:opacity-100"
                     )}
                   >
                     <LayoutGrid size={14} />
                   </button>
                 </div>
               </div>
-              <span className="font-mono text-[10px] opacity-50 uppercase tracking-wider">Step 02</span>
+              <span className="font-mono text-[10px] text-[#141414]/70 uppercase tracking-wider">Step 02</span>
             </div>
 
             <div className="flex-1 overflow-auto p-4">
@@ -359,10 +454,10 @@ export default function App() {
                     initial={{ opacity: 0 }}
                     animate={{ opacity: 1 }}
                     exit={{ opacity: 0 }}
-                    className="h-full flex flex-col items-center justify-center text-center opacity-30 py-20"
+                    className="h-full flex flex-col items-center justify-center text-center text-[#141414]/60 py-20"
                   >
                     <FileText size={48} strokeWidth={1} />
-                    <p className="mt-4 font-serif italic">Upload and process an image to see results</p>
+                    <p className="mt-4 font-medium">Upload and process an image to see results</p>
                   </motion.div>
                 )}
 
@@ -381,7 +476,7 @@ export default function App() {
                       </div>
                     </div>
                     <p className="mt-6 font-mono text-xs uppercase tracking-[0.2em]">Processing Image...</p>
-                    <p className="mt-2 text-[10px] opacity-50 max-w-[200px]">Gemini is reading the handwritten details and table data</p>
+                    <p className="mt-2 text-[10px] text-[#141414]/70 max-w-[200px]">Gemini is reading the handwritten details and table data</p>
                   </motion.div>
                 )}
 
@@ -394,22 +489,26 @@ export default function App() {
                   >
                     {/* Header Details Grid */}
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-4">
-                      <DetailRow icon={<User size={14}/>} label="Customer Name" value={data.job_card_details.customer_name} onChange={(v) => updateDetail('customer_name', v)} />
-                      <DetailRow icon={<Calendar size={14}/>} label="Date" value={data.job_card_details.date} onChange={(v) => updateDetail('date', v)} />
-                      <DetailRow icon={<Phone size={14}/>} label="Mobile" value={data.job_card_details.mobile_number} onChange={(v) => updateDetail('mobile_number', v)} />
-                      <DetailRow icon={<MapPin size={14}/>} label="Address" value={data.job_card_details.address} onChange={(v) => updateDetail('address', v)} />
-                      <DetailRow icon={<Hash size={14}/>} label="VIN Number" value={data.job_card_details.vin_number} onChange={(v) => updateDetail('vin_number', v)} />
-                      <DetailRow icon={<Calendar size={14}/>} label="Delivery Date" value={data.job_card_details.delivery_date} onChange={(v) => updateDetail('delivery_date', v)} />
-                      <DetailRow icon={<Truck size={14}/>} label="Vehicle Make" value={data.job_card_details.vehicle_make} onChange={(v) => updateDetail('vehicle_make', v)} />
-                      <DetailRow icon={<Hash size={14}/>} label="Registration" value={data.job_card_details.registration_number} onChange={(v) => updateDetail('registration_number', v)} />
-                      <DetailRow icon={<UserCheck size={14}/>} label="Work Done By" value={data.job_card_details.work_done_by} onChange={(v) => updateDetail('work_done_by', v)} />
-                      <DetailRow icon={<Gauge size={14}/>} label="KM Reading" value={data.job_card_details.km_reading} onChange={(v) => updateDetail('km_reading', v)} />
+                      <DetailRow icon={<User size={14}/>} label="Customer Name" value={data.job_card_details.customer_name} onChange={(v) => updateDetail('customer_name', v)} required showError={showErrors} />
+                      <DetailRow icon={<Calendar size={14}/>} label="Date" value={data.job_card_details.date} onChange={(v) => updateDetail('date', v)} required showError={showErrors} inputType="date" />
+                      <DetailRow icon={<Phone size={14}/>} label="Mobile" value={data.job_card_details.mobile_number} onChange={(v) => updateDetail('mobile_number', v)} required showError={showErrors} />
+                      <DetailRow icon={<MapPin size={14}/>} label="Address" value={data.job_card_details.address} onChange={(v) => updateDetail('address', v)} required showError={showErrors} />
+                      <DetailRow icon={<Hash size={14}/>} label="VIN Number" value={data.job_card_details.vin_number} onChange={(v) => updateDetail('vin_number', v)} required showError={showErrors} />
+                      <DetailRow icon={<Calendar size={14}/>} label="Delivery Date" value={data.job_card_details.delivery_date} onChange={(v) => updateDetail('delivery_date', v)} required showError={showErrors} inputType="date" />
+                      <DetailRow icon={<Truck size={14}/>} label="Vehicle Make" value={data.job_card_details.vehicle_make} onChange={(v) => updateDetail('vehicle_make', v)} required showError={showErrors} />
+                      <DetailRow icon={<Hash size={14}/>} label="Registration" value={data.job_card_details.registration_number} onChange={(v) => updateDetail('registration_number', v)} required showError={showErrors} />
+                      <DetailRow icon={<UserCheck size={14}/>} label="Work Done By" value={data.job_card_details.work_done_by} onChange={(v) => updateDetail('work_done_by', v)} required showError={showErrors} />
+                      <DetailRow icon={<Gauge size={14}/>} label="KM Reading" value={data.job_card_details.km_reading} onChange={(v) => updateDetail('km_reading', v)} required showError={showErrors} />
                     </div>
 
                     {/* Accessories Table */}
                     <div className="border border-[#141414]">
-                      <div className="bg-[#141414] text-[#E4E3E0] p-2 font-mono text-[10px] uppercase tracking-widest">
-                        Details of Accessories
+                      <div className="bg-[#141414] text-[#E4E3E0] p-2 font-mono text-[10px] uppercase tracking-widest flex justify-between items-center">
+                        <span>Details of Accessories</span>
+                        <button onClick={addItem} className="flex items-center gap-1 hover:opacity-70 transition-opacity" title="Add row">
+                          <Plus size={12} />
+                          <span className="text-[9px]">Add Row</span>
+                        </button>
                       </div>
                       <div className="overflow-x-auto">
                         <table className="w-full text-left border-collapse">
@@ -419,12 +518,13 @@ export default function App() {
                               <th className="p-2 font-mono text-[10px] uppercase tracking-wider border-r border-[#141414]">Description</th>
                               <th className="p-2 font-mono text-[10px] uppercase tracking-wider border-r border-[#141414]">Qty</th>
                               <th className="p-2 font-mono text-[10px] uppercase tracking-wider border-r border-[#141414]">Material</th>
-                              <th className="p-2 font-mono text-[10px] uppercase tracking-wider">Labour</th>
+                              <th className="p-2 font-mono text-[10px] uppercase tracking-wider border-r border-[#141414]">Labour</th>
+                              <th className="p-2 w-8"></th>
                             </tr>
                           </thead>
                           <tbody>
                             {data.items.map((item, idx) => (
-                              <tr key={idx} className="border-b border-[#141414] last:border-0 hover:bg-[#141414]/5 transition-colors">
+                              <tr key={idx} className="border-b border-[#141414] last:border-0 hover:bg-[#141414]/5 transition-colors group">
                                 <td className="p-1 font-mono text-xs border-r border-[#141414]">
                                   <input type="text" value={item.sl_no} onChange={(e) => updateItem(idx, 'sl_no', e.target.value)} className="w-full bg-transparent focus:outline-none px-1" />
                                 </td>
@@ -437,8 +537,13 @@ export default function App() {
                                 <td className="p-1 font-mono text-xs border-r border-[#141414]">
                                   <input type="text" value={item.material_cost} onChange={(e) => updateItem(idx, 'material_cost', e.target.value)} className="w-full bg-transparent focus:outline-none px-1" />
                                 </td>
-                                <td className="p-1 font-mono text-xs">
+                                <td className="p-1 font-mono text-xs border-r border-[#141414]">
                                   <input type="text" value={item.labour_cost} onChange={(e) => updateItem(idx, 'labour_cost', e.target.value)} className="w-full bg-transparent focus:outline-none px-1" />
+                                </td>
+                                <td className="p-1 text-center">
+                                  <button onClick={() => removeItem(idx)} className="opacity-0 group-hover:opacity-100 text-red-500 hover:text-red-700 transition-all" title="Remove row">
+                                    <Trash2 size={14} />
+                                  </button>
                                 </td>
                               </tr>
                             ))}
@@ -510,7 +615,7 @@ export default function App() {
 
       {/* Footer */}
       <footer className="max-w-7xl mx-auto p-6 mt-12 border-t border-[#141414]/10 flex flex-col md:flex-row justify-between items-center gap-4">
-        <p className="text-[10px] font-mono opacity-40 uppercase tracking-widest">
+        <p className="text-[10px] font-mono text-[#141414]/70 uppercase tracking-widest">
           &copy; 2024 Workshop Intelligence Systems. All rights reserved.
         </p>
         <div className="flex gap-6">
@@ -523,25 +628,32 @@ export default function App() {
   );
 }
 
-function DetailRow({ icon, label, value, onChange }: { icon: React.ReactNode, label: string, value: string, onChange?: (value: string) => void }) {
+function DetailRow({ icon, label, value, onChange, required, showError, inputType = 'text' }: { icon: React.ReactNode, label: string, value: string, onChange?: (value: string) => void, required?: boolean, showError?: boolean, inputType?: 'text' | 'date' }) {
+  const hasError = required && showError && !value?.trim();
   return (
     <div className="flex flex-col gap-1 border-b border-[#141414]/10 pb-2">
-      <div className="flex items-center gap-2 opacity-50">
+      <div className="flex items-center gap-2 text-[#141414]/70">
         {icon}
         <span className="font-mono text-[9px] uppercase tracking-wider">{label}</span>
       </div>
       {onChange ? (
         <input
-          type="text"
+          type={inputType}
           value={value || ''}
           onChange={(e) => onChange(e.target.value)}
           placeholder="Not specified"
-          className="font-medium text-sm min-h-[1.25rem] bg-transparent border-b border-transparent hover:border-[#141414]/20 focus:border-[#141414] focus:outline-none transition-colors placeholder:opacity-20 placeholder:italic"
+          className={cn(
+            "font-medium text-sm min-h-[1.25rem] bg-transparent border-b hover:border-[#141414]/20 focus:border-[#141414] focus:outline-none transition-colors placeholder:text-[#141414]/40",
+            hasError ? "border-red-500" : "border-transparent"
+          )}
         />
       ) : (
         <div className="font-medium text-sm min-h-[1.25rem]">
-          {value || <span className="opacity-20 italic">Not specified</span>}
+          {value || <span className="text-[#141414]/40">Not specified</span>}
         </div>
+      )}
+      {hasError && (
+        <span className="font-mono text-[9px] text-red-600">{label} is required</span>
       )}
     </div>
   );
@@ -574,7 +686,7 @@ function TotalRow({ label, value, highlight, onChange }: { label: string, value:
 
 function FooterLink({ label }: { label: string }) {
   return (
-    <a href="#" className="text-[10px] font-mono opacity-40 hover:opacity-100 transition-opacity uppercase tracking-widest">
+    <a href="#" className="text-[10px] font-mono text-[#141414]/60 hover:text-[#141414] transition-colors uppercase tracking-widest">
       {label}
     </a>
   );
