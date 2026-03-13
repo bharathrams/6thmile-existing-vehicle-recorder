@@ -1,5 +1,0 @@
-{
-  "name": "Workshop Job Card Extractor",
-  "description": "Extract structured data from workshop job card images into Excel-friendly JSON format using AI.",
-  "requestFramePermissions": []
-}
